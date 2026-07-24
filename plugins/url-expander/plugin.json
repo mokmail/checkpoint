@@ -1,0 +1,10 @@
+{
+  "name": "url-expander",
+  "version": "1.0.0",
+  "description": "Replaces bare URLs in user messages with clickable markdown links",
+  "main": "index.js",
+  "type": "filter",
+  "hooks": ["pre_chat"],
+  "permissions": [],
+  "config": {}
+}

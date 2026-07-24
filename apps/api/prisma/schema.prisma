@@ -1,0 +1,411 @@
+// AI Chat Interface — Prisma schema
+// Aligns with SPECIFICATION.md sections 2.2, 2.3, 2.4, 2.5, 2.7
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth & RBAC (spec §2.3) ───────────────────────────────────────────────
+
+enum AuthProvider {
+  LOCAL
+  GOOGLE
+  GITHUB
+  MICROSOFT
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  username      String    @unique
+  passwordHash  String?   // null for OAuth-only accounts
+  avatar        String?
+  emailVerified DateTime?
+  oauthProvider AuthProvider @default(LOCAL)
+  oauthId       String?
+  roles         RoleAssignment[]
+  groups        UserGroup[]
+  settings      Json?     // UserSettings
+  createdAt     DateTime  @default(now())
+  lastLogin     DateTime?
+  conversations Conversation[]
+  memories      Memory[]
+  agents        Agent[]
+  notes         Note[]
+  channels      ChannelMember[]
+  channelMsgs   ChannelMessage[]
+  artifacts     Artifact[]
+  events        CalendarEvent[]
+  workflows     Workflow[]
+  refreshTokens RefreshToken[]
+
+  @@index([oauthProvider, oauthId])
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  name        String           @unique
+  description String?
+  permissions RolePermission[]
+  users       RoleAssignment[]
+}
+
+model RolePermission {
+  id       String @id @default(cuid())
+  roleId   String
+  role     Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  resource String
+  action   String // create | read | update | delete
+  scope    String // own | group | all
+
+  @@index([roleId])
+}
+
+model RoleAssignment {
+  id     String @id @default(cuid())
+  userId String
+  roleId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+}
+
+model UserGroup {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  users     User[]
+  createdAt DateTime @default(now())
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ─── Chat (spec §2.2) ──────────────────────────────────────────────────────
+
+model Conversation {
+  id          String    @id @default(cuid())
+  title       String
+  model       String
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages    Message[]
+  archived    Boolean   @default(false)
+  pinned      Boolean   @default(false)
+  tags        String[]
+  systemPrompt String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId, updatedAt])
+  @@index([userId, pinned, archived])
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String   // user | assistant | system
+  content        String
+  model          String?
+  tokens         Int?
+  metadata       Json?
+  parentMessageId String? // for threads
+  createdAt      DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([parentMessageId])
+}
+
+// ─── Persistent Memory (spec §2.4) ─────────────────────────────────────────
+
+model Memory {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key          String
+  value        String
+  embedding    Float[]   // pgvector when extension enabled; stored as array fallback
+  importance   Float     @default(0)
+  lastAccessed DateTime  @default(now())
+  expiresAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([userId])
+  @@index([userId, key])
+}
+
+// ─── RAG / Knowledge (spec §2.5) ───────────────────────────────────────────
+
+model KnowledgeBase {
+  id            String     @id @default(cuid())
+  name          String     @unique
+  description   String?
+  embeddingModel String
+  documents     Document[]
+  createdAt     DateTime   @default(now())
+
+  @@index([name])
+}
+
+model Document {
+  id             String         @id @default(cuid())
+  knowledgeBaseId String
+  knowledgeBase  KnowledgeBase  @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  title          String
+  content        String
+  metadata       Json?
+  chunkCount     Int            @default(0)
+  chunks         DocumentChunk[]
+  uploadedAt     DateTime       @default(now())
+
+  @@index([knowledgeBaseId])
+}
+
+model DocumentChunk {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  content    String
+  embedding  Float[]
+  chunkIndex Int
+  metadata   Json?
+
+  @@index([documentId, chunkIndex])
+}
+
+// ─── Agents (spec §2.7) ────────────────────────────────────────────────────
+
+model Agent {
+  id             String   @id @default(cuid())
+  name           String
+  description    String?
+  systemPrompt   String
+  model          String?
+  tools          String[]
+  knowledgeBases String[] // KB ids
+  variables      Json?    // Variable[]
+  accessType     String   @default("private") // public | private | group
+  accessGroups   String[]
+  accessUsers    String[]
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId])
+  @@index([accessType])
+}
+
+// ─── Plugins (spec §2.6) ───────────────────────────────────────────────────
+
+model Plugin {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  version     String
+  description String?
+  author      String?
+  type        String   @default("filter") // filter | action | pipe | tool | skill
+  enabled     Boolean  @default(true)
+  config      Json?
+  hooks       String[] // hook names this plugin registers
+  permissions String[]
+  source      String   @default("builtin") // builtin | local | npm
+  filePath    String?  // for local plugins
+  userId      String?  // null = global/installable by all
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([enabled])
+  @@index([type])
+}
+
+// ─── Notes (spec §2.8) ─────────────────────────────────────────────────────
+
+model Folder {
+  id        String   @id @default(cuid())
+  name      String
+  parentId  String?
+  parent    Folder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children  Folder[] @relation("FolderTree")
+  notes     Note[]
+  createdAt DateTime @default(now())
+}
+
+model Note {
+  id         String   @id @default(cuid())
+  title      String
+  content    String
+  folderId   String?
+  folder     Folder?  @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  tags       String[]
+  version    Int      @default(1)
+  authorId   String
+  author     User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  sharedWith String[]
+  history    NoteVersion[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([authorId])
+  @@index([folderId])
+}
+
+model NoteVersion {
+  id        String   @id @default(cuid())
+  noteId    String
+  note      Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  content   String
+  version   Int
+  createdAt DateTime @default(now())
+
+  @@index([noteId, version])
+}
+
+// ─── Channels (spec §2.9) ──────────────────────────────────────────────────
+
+model Channel {
+  id          String           @id @default(cuid())
+  name        String
+  description String?
+  type        String           // public | private | direct
+  members     ChannelMember[]
+  messages    ChannelMessage[]
+  tags        String[]
+  createdAt   DateTime         @default(now())
+}
+
+model ChannelMember {
+  id        String  @id @default(cuid())
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, userId])
+}
+
+model ChannelMessage {
+  id           String   @id @default(cuid())
+  channelId    String
+  channel      Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  authorId     String
+  author       User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  content      String
+  taggedModels String[]
+  threadId     String?
+  pinned       Boolean  @default(false)
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  @@index([channelId, createdAt])
+  @@index([threadId])
+}
+
+// ─── Workflows (spec §2.12) ────────────────────────────────────────────────
+
+model Workflow {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  trigger     Json?
+  steps       Json?
+  enabled     Boolean  @default(true)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ─── Calendar (spec §2.13) ─────────────────────────────────────────────────
+
+model CalendarEvent {
+  id         String   @id @default(cuid())
+  title      String
+  description String?
+  start      DateTime
+  end        DateTime
+  allDay     Boolean  @default(false)
+  recurring  Json?
+  attendees  String[]
+  color      String   @default("#3b82f6")
+  reminders  Json?
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@index([userId, start])
+}
+
+// ─── Usage Analytics (spec §2.14) ──────────────────────────────────────────
+
+model UsageMetric {
+  id           String   @id @default(cuid())
+  userId       String?
+  model        String
+  messageCount Int      @default(0)
+  tokenCount   Int      @default(0)
+  cost         Float    @default(0)
+  timestamp    DateTime @default(now())
+
+  @@index([userId, timestamp])
+  @@index([model, timestamp])
+}
+
+model ModelEvaluation {
+  id         String   @id @default(cuid())
+  modelId    String   @unique
+  eloRating  Int      @default(1200)
+  wins       Int      @default(0)
+  losses     Int      @default(0)
+  ties       Int      @default(0)
+  lastUpdated DateTime @updatedAt
+}
+
+// ─── Artifact Storage (spec §2.15) ─────────────────────────────────────────
+
+model Artifact {
+  id        String   @id @default(cuid())
+  key       String
+  value     Json
+  type      String
+  scope     String   // personal | shared
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([key, scope, ownerId])
+  @@index([ownerId, scope])
+}
+
+// ─── Generated Images (spec §2.11) ─────────────────────────────────────────
+
+model GeneratedImage {
+  id         String   @id @default(cuid())
+  prompt     String
+  url        String
+  provider   String
+  model      String
+  parameters Json?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+}
